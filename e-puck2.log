@@ -1,0 +1,11 @@
+[e-puck2] kalibracja: baseline=67.1 SIDE=72.1 FRONT=77.1 target=76.1
+[e-puck2] step=1 nav=0 role=0 pos=(1.10,0.08) stuck=0
+[e-puck2] -> FOLLOWER wall_rule=1
+[e-puck2] step=51 nav=0 role=2 pos=(1.02,0.15) stuck=0
+[e-puck2] step=101 nav=0 role=2 pos=(0.86,0.15) stuck=0
+[e-puck2] step=151 nav=0 role=2 pos=(0.71,0.17) stuck=0
+[e-puck2] step=201 nav=0 role=2 pos=(0.72,0.32) stuck=0
+[e-puck2] step=251 nav=0 role=2 pos=(0.87,0.30) stuck=0
+[e-puck2] step=301 nav=0 role=2 pos=(0.98,0.27) stuck=0
+[e-puck2] step=351 nav=0 role=2 pos=(1.13,0.27) stuck=0
+[e-puck2] step=401 nav=0 role=2 pos=(1.12,0.43) stuck=0

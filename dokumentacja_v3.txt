@@ -1,0 +1,125 @@
+================================================================
+  E-puck Maze Controller — Wersja 3 (finalna)
+  Data: 2026-05-15
+================================================================
+
+PLIKI
+-----
+controllers/epuck_maze2/epuck_maze2.c       — kontroler robotów (v3)
+controllers/trail_supervisor/trail_supervisor.c — supervisor śladów
+worlds/labirynt.wbt                         — świat symulacji
+
+Backupy: epuck_maze2_v1.c / v2.c / v3.c, labirynt_v1.wbt / v2.wbt / v3.wbt
+
+
+OPIS ALGORYTMU
+--------------
+Oba roboty śledzą ścianę labiryntu płynnym P-kontrolerem (proporcjonalnym).
+Zamiast wykonywać skręty o stały kąt (jak w v1 i v2), robot ciągle
+koryguje prędkości obu kół w zależności od błędu odległości od ściany.
+
+  error = odczyt_czujnika_bocznego - wall_target
+  adj   = clamp(KP * error, ±FWD_SPEED*0.6)
+  lewe_koło  = FWD_SPEED + adj
+  prawe_koło = FWD_SPEED - adj
+
+Gdy ściana pojawi się z przodu, robot obraca się w miejscu aż front
+będzie wolny (nie przez stałą liczbę kroków, lecz czeka na sygnał czujnika).
+
+Podział ról:
+  e-puck  (ID=1, LEADER)   — śledzi lewą ścianę  (wall_rule = 0)
+  e-puck2 (ID=2, FOLLOWER) — śledzi prawą ścianę  (wall_rule = 1)
+
+Dzięki temu obaj badają różne korytarze jednocześnie.
+
+
+PARAMETRY KLUCZOWE
+------------------
+  FWD_SPEED      = MAX_SPEED * 0.7   (zmniejszone dla stabilności P-reg.)
+  DELTA_SIDE     = 5.0               (zwiększone z 3.0 — lepsza detekcja)
+  DELTA_FRONT    = 10.0              (zwiększone z 6.0)
+  KP             = 0.4               (wzmocnienie P-kontrolera)
+  WALL_OFFSET    = 4.0               (docelowy naddatek nad progiem SIDE_THR)
+  DEAD_ZONE      = 1.5               (martwa strefa — jedź prosto)
+  STUCK_STEPS    = 200               (kroki bez ruchu → UTURN)
+  UTURN_STEPS    = 20                (~180° obrotu awaryjnego)
+
+Kalibracja: mediana 160 odczytów czujników w spoczynku → baseline ≈ 67.5
+  SIDE_THR  = baseline + 5.0  ≈ 72.5
+  FRONT_THR = baseline + 10.0 ≈ 77.5
+  wall_target = SIDE_THR + 4.0 ≈ 76.5
+
+
+STANY NAWIGACJI
+---------------
+  NAV_FOLLOW      — główny tryb: P-kontroler śledzenia ściany
+  NAV_TURN_RIGHT  — obrót w prawo dopóki !w_front
+  NAV_TURN_LEFT   — obrót w lewo  dopóki !w_front
+  NAV_UTURN       — awaryjne 180° (taktowane, UTURN_STEPS kroków)
+  NAV_DONE        — robot znalazł wyjście, stoi
+
+
+KOMUNIKACJA MIĘDZY ROBOTAMI
+----------------------------
+  ID:<n>         — ustalanie ról (leader/follower) przez porównanie ID
+  POS:<n>:x:y    — broadcast pozycji co 20 kroków (follower hamuje gdy < 0.12m od lidera)
+  EXIT:<n>:x:y   — gdy jeden robot znajdzie wyjście, drugi też się zatrzymuje
+
+
+DETEKCJA WYJŚCIA
+----------------
+Kamera co 5 kroków liczy zielone piksele (g > r+50 i g > b+50).
+  green_fraction > 0.30 → wyjście znalezione → STOP + sygnał EXIT
+  green_fraction > 0.05 → widać trochę zieleni → jedź prosto
+
+
+ŚLADY NA PODŁODZE (trail_supervisor)
+-------------------------------------
+Osobny robot-supervisor (bez fizycznego ciała, supervisor=TRUE) co 8 kroków
+symulacji odczytuje pozycje obu robotów przez DEF-referencje i wstawia
+do świata małe sfery (r=0.005m):
+  EPUCK1 (e-puck)  → czerwone  (1 0 0)
+  EPUCK2 (e-puck2) → niebieskie (0 0.4 1)
+
+
+================================================================
+HISTORIA WERSJI I CO NIE DZIAŁAŁO
+================================================================
+
+--- Wersja 1 ---
+Taktowane skręty (TURN_STEPS=10 kroków = 90°).
+Oba roboty szły regułą lewej ręki.
+
+Problemy które naprawiono przed v1:
+  - TURN_STEPS=14 dawało obrót 124° zamiast 90° (błąd empiryczny).
+    Wzór: ω = 2*MAX_SPEED*0.5*0.02/0.052 = 2.42 rad/s → 8.87°/krok → 10 kroków = 89°
+  - Roboty wypadały z planszy przez brak fizycznych ścian przy wejściu północnym.
+    Naprawka: dodano dwa Solid (wN_ent1, wN_ent2) zamykające wejście.
+  - GRANICA (y < 0.10) wyzwalała się natychmiast po starcie bo robot startuje na y=0.09.
+    Naprawka: GRANICA zmieniona na y < -0.05 (praktycznie wyłączona; ściany robią robotę).
+
+--- Wersja 2 ---
+Dodano regułę prawej ręki dla followera i licznik wizyt per komórka (visits[10][10])
+do przerywania pętli oscylacji (flip reguły po VISIT_MAX=4 wejściach do tej samej komórki).
+
+--- Wersja 3 ---
+Zastąpiono taktowane skręty P-kontrolerem. Robot płynnie koryguje prędkości kół
+zamiast zatrzymywać się i obracać o stały kąt. Skręty przy frontalnej ścianie
+trwają tyle ile potrzeba (aż czujnik powie "wolno"), nie dokładnie 90°.
+
+--- DLACZEGO Pen NIE DZIAŁAŁ ---
+Pierwsza próba śladów: urządzenie Pen (webots/pen.h) dodane do turretSlot E-puck PROTO.
+Błąd: "pen" device not found / wb_pen_write(): invalid device tag.
+
+Przyczyna: E-puck PROTO w Webots R2023b nie eksponuje urządzenia Pen
+do kontrolera gdy jest umieszczone w turretSlot. Urządzenia GPS, emitter,
+receiver działają bo mają specjalne traktowanie w silniku Webots.
+Pen jako "actuator surface" wymaga być bezpośrednim dzieckiem węzła Robot
+lub umieszczenia w dedykowanym slocie — E-puck PROTO tego nie udostępnia.
+
+Rozwiązanie: Supervisor wstawiający węzły Solid dynamicznie przez:
+  wb_supervisor_field_import_mf_node_from_string()
+(Uwaga: funkcja wb_supervisor_field_insert_mf_node() NIE ISTNIEJE w R2023b —
+ prawidłowa nazwa to import_mf_node_from_string)
+
+================================================================

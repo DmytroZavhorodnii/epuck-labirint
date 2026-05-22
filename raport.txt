@@ -1,0 +1,202 @@
+RAPORT - Symulacja robotów mobilnych w labiryncie
+Webots R2023b, E-puck, C
+=======================================================
+
+1. PROJEKT LABIRYNTU (Zadanie 1)
+---------------------------------
+Labirynt 10x10 komórek wygenerowany algorytmem DFS (Depth-First Search,
+rekurencyjne cofanie) z losowym ziarnem seed=42, co zapewnia powtarzalność.
+
+Parametry geometryczne:
+  - Rozmiar komórki: CELL = 0.2 m
+  - Grubość ściany:  WTHK = 0.02 m
+  - Wysokość ściany: WHGT = 0.15 m
+  - Szerokość korytarza (wewnętrzna): ~0.18 m ≈ 2.4 średnicy robota E-puck
+
+Układ współrzędnych: ENU (X=Wschód, Y=Północ, Z=Góra), standard Webots R2023b.
+Ściany leżą w płaszczyźnie X-Y, Z=0 to podłoga.
+
+Wejścia i wyjście:
+  - Wejście 1: przerwa w ścianie północnej, kolumna 0 (X≈0.1)
+  - Wejście 2: przerwa w ścianie północnej, kolumna 5 (X≈1.1)
+  - Wyjście:   przerwa w ścianie południowej, kolumna 9 (X≈1.9)
+
+Cel (goal): zielony prostopadłościan (baseColor 0 0.8 0, emissiveColor 0 0.5 0)
+umieszczony tuż za wyjściem od strony południa.
+
+Plik świata generowany automatycznie skryptem generate_world.py.
+
+
+2. NAWIGACJA POJEDYNCZEGO ROBOTA (Zadanie 2)
+---------------------------------------------
+Kontroler: epuck_maze2.c (język C, Webots R2023b C API).
+Algorytm: reguła lewej ręki (left-hand wall following).
+
+2.1 Kalibracja czujników
+Czujniki proximity E-pucka w Webots mają niezerowy odczyt tła (~65 jednostek)
+wynikający z oświetlenia TexturedBackgroundLight. Podczas 20 kroków startowych,
+gdy robot stoi nieruchomo, zbierane są wszystkie 8×20=160 odczytów w tablicy C.
+Tablica jest sortowana funkcją qsort(), jako próg bazowy używana jest MEDIANA
+(nie minimum!), co eliminuje outlier-y (np. czujnik skierowany w otwarte wejście
+odczytuje ~54, zamiast typowych ~65-67).
+
+  baseline = mediana(wszystkich odczytów kalibracyjnych)
+  SIDE_THR  = baseline + 5   (wykrycie ściany bocznej)
+  FRONT_THR = baseline + 9   (wykrycie ściany przedniej, wyższy próg bo
+                               czujniki diagonalne ps0/ps7 widzą ściany boczne)
+
+Wyniki kalibracji (typowe):
+  baseline ≈ 67.6, SIDE_THR ≈ 72.6, FRONT_THR ≈ 76.6
+
+Fragment kodu kalibracji (C):
+  double cal[CALIBRATION_STEPS * 8];
+  int cal_n = 0;
+  for (int i = 0; i < CALIBRATION_STEPS; i++) {
+    wb_robot_step(TIME_STEP);
+    for (int j = 0; j < 8; j++)
+      cal[cal_n++] = wb_distance_sensor_get_value(ps[j]);
+  }
+  qsort(cal, cal_n, sizeof(double), cmp_double);
+  double baseline = cal[cal_n / 2];
+
+2.2 Wykrywanie ścian
+Używane czujniki (stałe zdefiniowane przez #define):
+  - PS_FR (ps0, 10° od przodu-prawego) i PS_FL (ps7, 10° od przodu-lewego)
+    → wykrywanie ściany przed robotem (w_front)
+  - PS_L  (ps6, czysto boczny lewy)    → ściana po lewej  (w_left)
+
+2.3 Automat stanów nawigacji
+Stan zapisany w zmiennej typu wyliczeniowego NavState:
+  NAV_FOLLOW, NAV_TURN_RIGHT, NAV_TURN_LEFT, NAV_FORWARD_AFTER_LEFT, NAV_DONE
+
+Reguła lewej ręki:
+  - Brak ściany po lewej → skręt w lewo (NAV_TURN_LEFT, 14 kroków ≈ 90°)
+  - Ściana po lewej, brak z przodu → jedź prosto (FWD_SPEED)
+  - Ściana po lewej i z przodu → skręt w prawo (NAV_TURN_RIGHT)
+
+Po skręcie w lewo robot jedzie prosto przez 6 kroków (NAV_FORWARD_AFTER_LEFT),
+aby przejechać przez skrzyżowanie zanim ponownie sprawdzi czujniki.
+Eliminuje to oscylacje (bez tej fazy robot kręciłby się w kółko na złączach).
+
+2.4 Wykrywanie wyjścia
+Co 5 kroków kamera (52×39 px) analizuje obraz. Funkcja green_fraction() iteruje
+po wszystkich pikselach przez wb_camera_image_get_green/red/blue():
+  - green > red + 50 i green > blue + 50 → piksel "zielony"
+  - Frakcja zielonych pikseli > 5%  → wyjście widoczne, jedź prosto
+  - Frakcja > 35% → wyjście osiągnięte, zatrzymaj i wyślij komunikat FOUND_EXIT
+
+
+3. DWA ROBOTY I KOMUNIKACJA (Zadanie 3)
+----------------------------------------
+Drugi robot E-puck2 startuje z wejścia 2 (kolumna 5), obrócony o 180°.
+Oba roboty używają tego samego kontrolera epuck_maze2.c (skompilowanego do
+epuck_maze2.exe za pomocą dołączonego Makefile i standardowego Makefile.include
+z Webots).
+
+Komunikacja przez wbudowany kanał emitter/receiver E-pucka (COMM_CHANNEL=1).
+E-puck PROTO zawiera już wbudowane emitter i receiver – nie dodajemy ich
+ponownie w turretSlot. W turretSlot dodajemy tylko GPS.
+API C: wb_emitter_send(), wb_receiver_get_data(), wb_receiver_next_packet().
+
+Stan komunikacji zapisany w zmiennej typu CommState:
+  COMM_SOLO, COMM_NEGOTIATING, COMM_LEADER, COMM_FOLLOWER
+
+3.1 Wykrywanie spotkania
+Gdy robot w trybie COMM_SOLO wykryje na czujniku przednim (ps0 lub ps7) odczyt
+wyraźnie powyżej tła (> SIDE_THR + 150), wysyła broadcast HELLO i ROLL.
+
+3.2 Wybór lidera (election)
+Protokół losowy z rolkami (rand() / RAND_MAX):
+  1. Robot A wysyła "HELLO:<id>"
+  2. Robot B odpowiada "ROLL:<id>:<wartość_losowa>"
+  3. Robot A wysyła własny "ROLL:<id>:<wartość_losowa>"
+  4. Robot z wyższą wartością losową zostaje LIDEREM (COMM_LEADER),
+     drugi FOLLOWEREM (COMM_FOLLOWER)
+
+3.3 Zachowanie lidera i followera
+LIDER: kontynuuje nawigację algorytmem reguły lewej ręki (bez zmian).
+
+FOLLOWER: nawiguje samodzielnie algorytmem reguły lewej ręki (tak samo jak
+lider), ale dodatkowo zatrzymuje się gdy lider jest bardzo blisko z przodu:
+  leader_close = (pv[PS_FR] - baseline > LEADER_THR ||
+                  pv[PS_FL] - baseline > LEADER_THR)
+Próg LEADER_THR=500 odpowiada odległości ~5 cm. Ściany na typowych odległościach
+korytarzowych dają delta < 150, więc nie wyzwalają fałszywych zatrzymań.
+Robot E-pucka w odległości < 5 cm daje delta > 2000.
+
+3.4 Detekcja utknięcia lidera
+Lider porównuje kolejne pozycje GPS (wb_gps_get_values()) co krok. Jeśli przez
+100 kolejnych kroków przesuwa się o mniej niż 0.001 m (obliczone przez sqrt()),
+wysyła "SWAP_ROLES" i zamienia się rolami z followerem (stuck_cnt, last_x/y).
+
+3.5 Zakończenie
+Gdy którykolwiek robot dotrze do wyjścia (zielona frakcja > 35%), zatrzymuje
+się i wysyła "FOUND_EXIT:<id>". Drugi robot może kontynuować samodzielnie.
+
+
+4. NAPOTKANE PROBLEMY I ROZWIĄZANIA
+--------------------------------------
+
+Problem 1: Robot kręcił się w kółko
+  Przyczyna: czysta reaktywna reguła lewej ręki bez pamięci stanu
+             powoduje oscylacje – robot naprzemiennie wykrywał i tracił ścianę.
+  Rozwiązanie: automat stanów (NavState enum) z licznikami kroków
+               (TURN_STEPS=14 kroków na skręt ≈ 90°,
+                FORWARD_STEPS=6 kroków po skręcie w lewo).
+
+Problem 2: Czujniki nie wykrywały ścian
+  Przyczyna: tło czujników proximity wynosi ~65 jednostek (ambient IR od
+             TexturedBackgroundLight). Stałe progi (SIDE_THR=80) były za wysokie.
+             Ściany w odległości 0.063 m dają odczyt tylko ~70-80.
+  Rozwiązanie: automatyczna kalibracja na starcie – robot stoi 20 kroków
+               i mierzy medianę odczytów (qsort + indeks środkowy) jako baseline.
+
+Problem 3: Robot e-puck2 kalibrował się błędnie (baseline=54.7 zamiast ~67)
+  Przyczyna: jeden czujnik skierowany w otwarte wejście labiryntu daje
+             bardzo niski odczyt (brak refleksji). Użycie minimum
+             zamiast mediany dawało błędnie niski próg.
+  Rozwiązanie: mediana zamiast minimum w kalibracji.
+
+Problem 4: Duplikat urządzeń emitter/receiver
+  Przyczyna: E-puck PROTO ma wbudowane emitter i receiver. Dodanie ich
+             ponownie w turretSlot powodowało konflikt nazw i ostrzeżenia.
+  Rozwiązanie: usunięcie emitter/receiver z turretSlot, użycie wbudowanych
+               przez wb_robot_get_device("emitter/receiver").
+
+Problem 5: Follower zatrzymywał się z powodu ścian (nie lidera)
+  Przyczyna: LEADER_THR za niski lub zbyt restrykcyjny operator AND –
+             ściany pod kątem dawały odczyt delta~300-480, co było mylone
+             z bliskim robotem.
+  Rozwiązanie: LEADER_THR=500 z operatorem OR (stop gdy JEDEN czujnik
+               przekroczy próg). Ściany korytarzowe dają delta<150, więc
+               próg 500 ich nie wyzwala. Robot E-pucka w odległości <5 cm
+               daje delta>2000, więc jest wykrywany pewnie.
+
+Problem 6: Kompilacja – Build nieaktywny w Webots
+  Przyczyna: Webots aktywuje przycisk Build dopiero po otwarciu pliku kontrolera
+             w wbudowanym edytorze tekstowym.
+  Rozwiązanie: prawym przyciskiem na E-puck → Edit Controller → otwarcie .c,
+               następnie Build → Build (skrót Ctrl+Shift+B).
+
+
+5. PODSUMOWANIE
+----------------
+Oba roboty E-puck, sterowane kontrolerem w języku C (epuck_maze2.c):
+  - Nawigują przez labirynt 10x10 algorytmem reguły lewej ręki
+  - Automatycznie kalibrują czujniki proximity na starcie (qsort, mediana)
+  - Wykrywają zielone wyjście kamerą (wb_camera_image_get_green/red/blue)
+  - Komunikują się przez wbudowany emitter/receiver i wybierają lidera
+    metodą losowania (rand() / RAND_MAX)
+  - Lider i follower poruszają się niezależnie; follower ustępuje liderowi
+    gdy ten jest bardzo blisko z przodu (LEADER_THR=500)
+  - System wykrywania utknięcia (GPS + licznik kroków) zamienia role
+    gdy lider przestaje się poruszać przez 100 kroków
+
+Pliki projektu:
+  worlds/labirynt.wbt              – świat Webots (generowany automatycznie)
+  generate_world.py                – skrypt generujący labirynt (DFS, seed=42)
+  controllers/epuck_maze2/
+    epuck_maze2.c                  – kontroler C (Zadania 2 i 3)
+    epuck_maze2.exe                – skompilowany plik wykonywalny
+    Makefile                       – standardowy Makefile Webots C
+  controllers/epuck_maze/          – kontroler dla pojedynczego robota (Zadanie 1)

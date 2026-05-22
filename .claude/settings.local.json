@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(cmd /c \"tree \"\"C:\\\\Users\\\\Administrator\\\\Desktop\\\\labirynt\"\" /F 2>nul\")"
+    ]
+  }
+}
